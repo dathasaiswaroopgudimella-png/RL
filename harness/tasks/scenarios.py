@@ -1,7 +1,12 @@
-"""OpsArena Scenarios: 8 Deterministic Incident Response Families with Seeded Diversity."""
+"""OpsArena Scenarios: 8 Deterministic Incident Response Families with Seeded Diversity.
+
+All task instructions describe symptoms, business impact, and SLO constraints without
+leaking hidden root causes or exact tool parameters.
+"""
 import random
 from typing import Any, Dict, Tuple
 from .base import TaskInstance
+from sandbox.simulator.world import MIN_SAFE_REPLICAS
 
 
 def build_cache_pressure_task(seed: int) -> TaskInstance:
@@ -24,13 +29,14 @@ def build_cache_pressure_task(seed: int) -> TaskInstance:
         title="Redis Eviction Storm",
         difficulty="easy",
         instructions=(
-            f"A cache memory eviction storm on `cache-cluster` (initial memory: {initial_mem}MB, surge traffic: {surge_qps} RPS) "
-            "is causing a thundering herd on `db-primary`, spiking CPU to 96% and latency to 1180ms. "
-            "Investigate logs, scale `cache-cluster` to at least 2 replicas to expand memory capacity, and resolve the incident."
+            "Production alert: The checkout flow is experiencing severe degradation with `db-primary` reporting "
+            "near-100% CPU utilization and elevated query latency. Diagnose cache and database telemetry, "
+            "identify why the database is being overwhelmed, and restore normal performance within operational budget limits."
         ),
         scenario_spec={
             "task_id": "task_01_cache_pressure",
             "seed": seed,
+            "initial_mem": initial_mem,
             "surge_qps": surge_qps,
             "target_services": ["cache-cluster"],
             "service_overrides": {
@@ -67,13 +73,15 @@ def build_bad_deployment_task(seed: int) -> TaskInstance:
         title="Bad Release Rollback",
         difficulty="easy",
         instructions=(
-            f"Following deployment of `{bad_version}` on `order-service`, users are experiencing HTTP 500 errors "
-            f"({err_rate_initial}% error rate). Check the logs and metrics, roll back `order-service` to previous stable "
-            "release `v2.4.0`, and verify restoration."
+            "Production alert: High HTTP 500 error rates detected on customer checkouts immediately following a recent "
+            "deployment. Investigate service logs and telemetry across the checkout pipeline, determine the failing "
+            "component and deployment status, and restore service health to meet the < 0.1% error rate SLO."
         ),
         scenario_spec={
             "task_id": "task_02_bad_deployment",
             "seed": seed,
+            "bad_version": bad_version,
+            "err_rate_initial": err_rate_initial,
             "target_services": ["order-service"],
             "service_overrides": {
                 "order-service": {"version": bad_version}
@@ -113,13 +121,15 @@ def build_db_pool_exhaustion_task(seed: int) -> TaskInstance:
         title="Connection Pool Starvation",
         difficulty="medium",
         instructions=(
-            f"Under checkout bursts ({burst_rps} RPS), `inventory-service` (initial pool: {initial_pool}) is timing out "
-            "waiting for database connections (HTTP 504 errors). Diagnose the connection bottleneck and update "
-            "`inventory-service`'s `db_pool_size` configuration to at least 25."
+            "Production alert: `inventory-service` is returning HTTP 504 Gateway Timeouts under burst checkout traffic. "
+            "Investigate application logs to identify the resource bottleneck, adjust the necessary configuration parameters "
+            "to support required throughput, and restore inventory responsiveness."
         ),
         scenario_spec={
             "task_id": "task_03_db_pool_exhaustion",
             "seed": seed,
+            "initial_pool": initial_pool,
+            "burst_rps": burst_rps,
             "target_services": ["inventory-service"],
             "service_overrides": {
                 "inventory-service": {"config": {"db_pool_size": initial_pool}}
@@ -145,7 +155,7 @@ def build_downstream_timeout_task(seed: int) -> TaskInstance:
         timeout = pmt.get("config", {}).get("gateway_timeout_ms", partner_hang_ms)
         is_resolved = bool(cb or (isinstance(timeout, (int, float)) and timeout <= 1000))
         error_rate = 0.04 if is_resolved else 8.6
-        latency = 62.0 if is_resolved else 2850.0
+        latency = 62.0 if is_resolved else (partner_hang_ms * 0.4)
         progress = 1.0 if is_resolved else 0.0
         return is_resolved, error_rate, latency, progress
 
@@ -154,13 +164,14 @@ def build_downstream_timeout_task(seed: int) -> TaskInstance:
         title="Slow Third-Party Gateway",
         difficulty="medium",
         instructions=(
-            f"Outbound calls to external payment gateway are hanging for up to {partner_hang_ms}ms, causing thread "
-            "starvation in `payment-service` and cascading to API gateway. Enable `circuit_breaker_enabled` on "
-            "`payment-service` (or reduce `gateway_timeout_ms` to <= 1000) to isolate the degradation."
+            "Production alert: Intermittent payment processing delays are causing thread pool starvation in `payment-service` "
+            "and cascading latency to upstream services. Investigate logs, identify the external dependency hang, and apply "
+            "resilience controls to isolate the partner failure and bring p99 latency under 100ms."
         ),
         scenario_spec={
             "task_id": "task_04_downstream_timeout",
             "seed": seed,
+            "partner_hang_ms": partner_hang_ms,
             "target_services": ["payment-service"],
             "service_overrides": {
                 "payment-service": {
@@ -197,13 +208,14 @@ def build_cascading_failure_task(seed: int) -> TaskInstance:
         title="Thundering Herd Cascade",
         difficulty="hard",
         instructions=(
-            f"A flash sale traffic surge ({flash_rps} RPS) has overwhelmed `order-service`, causing OOM crashes "
-            "and 34% error rate. Scale `order-service` replica pool to at least 6 pods to absorb traffic "
-            "and restore cluster SLO."
+            "Production alert: A sudden traffic surge has caused critical queue backlogs and OutOfMemory errors across the "
+            "ordering pipeline, pushing error rates over 30%. Analyze workload demand and service capacity, and scale the "
+            "bottleneck service appropriately to absorb the surge and restore cluster SLOs."
         ),
         scenario_spec={
             "task_id": "task_05_cascading_failure",
             "seed": seed,
+            "flash_rps": flash_rps,
             "target_services": ["order-service"],
             "service_overrides": {
                 "order-service": {"replicas": 2}
@@ -237,12 +249,14 @@ def build_canary_leak_task(seed: int) -> TaskInstance:
         title="Memory Leak in Canary Route",
         difficulty="medium",
         instructions=(
-            f"Canary deployment for `order-service` ({canary_split}% traffic) has a severe memory leak (98.4% memory, 6.2% error rate). "
-            "Safely drain traffic from the failing canary route by shifting `order-service` traffic weight to 0."
+            "Production alert: Memory usage alerts triggered across the order-processing tier with elevated error rates on "
+            "canary traffic. Inspect canary and primary telemetry, locate the malfunctioning route, and reroute ingress traffic "
+            "to safeguard customer traffic."
         ),
         scenario_spec={
             "task_id": "task_06_canary_leak",
             "seed": seed,
+            "canary_split": canary_split,
             "target_services": ["order-service"],
             "service_overrides": {
                 "order-service": {"traffic_weight": canary_split}
@@ -267,8 +281,14 @@ def build_cost_slo_rescue_task(seed: int) -> TaskInstance:
 
     def verify(services: Dict[str, Any], cost_spent: float) -> Tuple[bool, float, float, float]:
         total_replicas = sum(s.get("replicas", 0) for s in services.values())
-        all_alive = all(s.get("replicas", 0) >= 1 for s in services.values())
-        is_resolved = bool(total_replicas <= 18 and all_alive)
+        # Rigorous exploit prevention: verify every service satisfies minimum safe operational capacity
+        safe_capacity = all(s.get("replicas", 0) >= MIN_SAFE_REPLICAS.get(name, 1) for name, s in services.items())
+
+        if not safe_capacity:
+            # Undersized cluster exploit: capacity starvation breaches SLO
+            return False, 18.5, 1250.0, 0.0
+
+        is_resolved = bool(total_replicas <= 18)
         progress = 1.0 if is_resolved else min(0.5, max(0.0, (36 - total_replicas) / 18.0 * 0.5))
         error_rate = 0.04
         latency = 55.0
@@ -279,9 +299,10 @@ def build_cost_slo_rescue_task(seed: int) -> TaskInstance:
         title="Overprovisioned Financial Drain",
         difficulty="hard",
         instructions=(
-            "Platform services are excessively overscaled (36 total pods), burning $540/hr with average CPU below 12%. "
-            "Right-size `api-gateway`, `order-service`, and `db-replica` to safe capacity levels (3 pods each, and 2 for db-replica, "
-            "bringing total cluster pods to <= 18) without violating latency SLOs."
+            "Production alert: Infrastructure billing reports show severe over-provisioning across multiple service tiers "
+            "with cluster CPU utilization averaging under 15% ($540/hr burn rate). Audit service topologies and right-size "
+            "the over-allocated services to bring total cluster pods to 18 or fewer, while preserving sufficient capacity "
+            "for all services to meet the < 100ms latency and < 0.1% error rate SLOs."
         ),
         scenario_spec={
             "task_id": "task_07_cost_slo_rescue",
@@ -324,13 +345,15 @@ def build_migration_lock_task(seed: int) -> TaskInstance:
         title="Database Migration Schema Lock",
         difficulty="hard",
         instructions=(
-            f"A background migration (PID {migration_pid}) acquired an exclusive table lock on `{blocked_table}` on `db-primary`, "
-            "causing write queries to block and timeout (22% error rate). Configure `lock_timeout_ms` to 1000ms on "
-            "`db-primary` to abort blocking locks and restore checkout throughput."
+            "Production alert: Transaction pile-ups and connection exhaustion on `db-primary` are blocking checkout operations, "
+            "resulting in elevated 504 errors. Investigate database logs to determine the cause of query blocking, "
+            "and configure database timeout policies to prevent long-held locks from disrupting online traffic."
         ),
         scenario_spec={
             "task_id": "task_08_migration_lock",
             "seed": seed,
+            "blocked_table": blocked_table,
+            "migration_pid": migration_pid,
             "target_services": ["db-primary"],
             "service_overrides": {
                 "db-primary": {"config": {"lock_timeout_ms": 0}}

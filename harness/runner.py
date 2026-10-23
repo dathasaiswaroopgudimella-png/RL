@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from .env import PASS_SCORE
 from .tools import SPECS, TOOLS, TOOL_NAMES, check_args
+from sandbox.simulator.security import clip_output
 
 SYSTEM_PROMPT = (
     "You are an expert autonomous site reliability engineering (SRE) agent operating in the OpsArena cloud mesh. "
@@ -24,8 +25,8 @@ TRIMMED_ARGS = '{"note": "arguments removed to save context budget"}'
 
 @dataclass
 class Limits:
-    max_steps: int = 40                   # Max model turns per episode
-    max_seconds: int = 600                # 10-minute wall-clock cap
+    max_steps: int = 40                   # Max model turns per episode (hard cap: 40)
+    max_seconds: int = 600                # Max wall-clock budget (hard cap: 600s / 10 min)
     max_tool_calls: int = 10              # Max tool calls executed per turn
     context_budget_tokens: int = 48000    # Context window trimming budget
     max_output_chars: int = 4000          # Per-tool output character limit
@@ -108,14 +109,14 @@ def run_scripted(env: Any, task_id: str, seed: int, actions: List[Any], agent: s
             "tool_result": [text],
             "errors": [{"kind": "tool_error", "detail": text}] if is_error else [],
             "state": {"hash": env.state_hash()},
-            "reward": env.score(),
+            "reward": env.score(model_turns=step),
             "tokens": 0,
             "latency_ms": 0,
         }
         log.write(record)
         show(record)
 
-    final = env.score()
+    final = env.score(model_turns=step)
     log.write({
         "timestamp": now(),
         "agent": agent,
@@ -146,21 +147,33 @@ def run_episode(
         {"role": "user", "content": prompt},
     ]
 
+    max_steps = min(40, limits.max_steps)
+    max_seconds = min(600, limits.max_seconds)
+
     started: Optional[float] = None
     termination: Optional[str] = None
     finished: bool = False
     steps: int = 0
 
-    for step in range(1, limits.max_steps + 1):
-        if started is not None and (time.monotonic() - started) >= limits.max_seconds:
+    for step in range(1, max_steps + 1):
+        if started is not None and (time.monotonic() - started) >= max_seconds:
             termination = "time_cap"
             break
         if started is None:
             started = time.monotonic()
 
+        remaining = max_seconds - (time.monotonic() - started)
+        if remaining <= 0:
+            termination = "time_cap"
+            break
+
+        call_timeout = min(remaining, 120.0)
+        if call_timeout <= 0:
+            termination = "time_cap"
+            break
+
         trim_history(messages, limits.context_budget_tokens)
         sent = copy.deepcopy(messages)
-        remaining = limits.max_seconds - (time.monotonic() - started)
         call_start = time.monotonic()
         steps = step
 
@@ -182,7 +195,7 @@ def run_episode(
         }
 
         try:
-            reply = client.complete(sent, TOOLS, timeout=max(5, min(120, remaining)))
+            reply = client.complete(sent, TOOLS, timeout=call_timeout)
         except Exception as exc:
             record["errors"].append({"kind": "model_call_failed", "detail": f"{type(exc).__name__}: {exc}"})
             log.write(record)
@@ -233,18 +246,20 @@ def run_episode(
                 record["errors"].append({"kind": "invalid_arguments", "detail": f"{call.name}: {problem}"})
             elif call.name == "finish":
                 finished = True
-                result = "Episode finished. Verifying resolution and calculating score."
+                result, is_error = env.step("finish", {})
+                if is_error:
+                    record["errors"].append({"kind": "tool_error", "detail": result})
             else:
                 result, is_error = env.step(call.name, args)
                 if is_error:
                     record["errors"].append({"kind": "tool_error", "detail": result})
 
-            result = result[:limits.max_output_chars]
+            result = clip_output(result, limits.max_output_chars)
             record["tool_result"].append(result)
             messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
 
         record["state"] = {"hash": env.state_hash()}
-        record["reward"] = env.score()
+        record["reward"] = env.score(model_turns=step)
         log.write(record)
         show(record)
 
@@ -254,7 +269,7 @@ def run_episode(
         termination = "step_cap"
 
     try:
-        final = env.score()
+        final = env.score(model_turns=steps)
     except Exception as exc:
         final = {"total": None, "error": str(exc)}
         termination = termination or "crash"

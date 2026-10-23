@@ -12,6 +12,19 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 
+# Minimum safe pod capacity per microservice to satisfy nominal traffic without SLO degradation
+MIN_SAFE_REPLICAS: Dict[str, int] = {
+    "api-gateway": 3,
+    "order-service": 3,
+    "payment-service": 2,
+    "inventory-service": 2,
+    "recommendation-service": 1,
+    "cache-cluster": 1,
+    "db-primary": 1,
+    "db-replica": 2,
+}
+
+
 @dataclass
 class ServiceState:
     name: str
@@ -157,15 +170,20 @@ class CloudMeshWorld:
 
         penalties = 0.0
         for name, svc in self.services.items():
-            if name in target_services:
-                continue
             base = self.baseline_health.get(name, {})
 
-            # Severe penalty if replicas drained below 1
+            # Severe penalty if any service is completely drained below 1 pod
             if svc.replicas < 1:
                 penalties += 0.50
-            # Penalty if unneeded downscaling happened on an active service
-            elif svc.replicas < base.get("replicas", 2) and task_id != "task_07_cost_slo_rescue":
+            # Capacity penalty if scaled below minimum safe operational threshold
+            elif svc.replicas < MIN_SAFE_REPLICAS.get(name, 1):
+                penalties += 0.35
+
+            if name in target_services:
+                continue
+
+            # Penalty if unneeded downscaling happened on an unaffected service
+            if svc.replicas < base.get("replicas", 2) and task_id != "task_07_cost_slo_rescue":
                 penalties += 0.25
 
             # Penalty if a non-target service's stable version was modified
@@ -176,14 +194,28 @@ class CloudMeshWorld:
             if svc.traffic_weight == 0 and task_id != "task_06_canary_leak":
                 penalties += 0.40
 
+            # Config regression check: penalize unauthorized config mutations on non-target services
+            base_config = base.get("config", {})
+            for cfg_k, cfg_v in svc.config.items():
+                if cfg_k in base_config and base_config[cfg_k] != cfg_v:
+                    penalties += 0.25
+                elif cfg_k not in base_config:
+                    penalties += 0.25
+
         return max(0.0, 1.0 - penalties)
 
     def state_hash(self) -> str:
-        """Computes a full 64-character SHA-256 hash of topology, configs, and fault state."""
+        """Computes a full 64-character SHA-256 hash of topology, configs, fault state, and scenario spec."""
+        incident = self.active_incident or {}
+        # Filter instructions string to keep state compact while preserving all seeded parameters
+        incident_spec = {k: v for k, v in sorted(incident.items()) if k != "instructions"}
+
         state_repr = {
             "services": {name: s.to_dict() for name, s in sorted(self.services.items())},
-            "incident_id": self.active_incident.get("task_id", "") if self.active_incident else "",
+            "incident_id": incident.get("task_id", ""),
+            "incident_spec": incident_spec,
             "cost_spent": round(self.cost_spent, 2),
+            "step_count": self.step_count,
             "finished": self.finished,
         }
         raw_bytes = json.dumps(state_repr, sort_keys=True).encode("utf-8")

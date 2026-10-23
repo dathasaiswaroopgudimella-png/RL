@@ -9,7 +9,7 @@ Where P in [0.0, 1.0] reflects continuous incident remediation progress:
   - P = 1.00 for full SLO restoration and resolution
 """
 import json
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 import requests
 from .tasks import build_task
 
@@ -52,35 +52,66 @@ class Env:
         )
 
     def step(self, name: str, args: Dict[str, Any]) -> Tuple[str, bool]:
-        """Executes a single operational tool call."""
-        result = self._post("/tool", {"name": name, "args": args}, self.tool_timeout)
-        return result.get("output", ""), result.get("is_error", False)
+        """Executes a single operational tool call with network exception isolation."""
+        try:
+            result = self._post("/tool", {"name": name, "args": args}, self.tool_timeout)
+            return result.get("output", ""), result.get("is_error", False)
+        except requests.RequestException as exc:
+            return f"error: sandbox communication failure: {exc}", True
 
     def state_hash(self) -> str:
         """Returns the full 64-character SHA-256 state hash of the sandbox environment."""
-        state = self._get("/state", self.tool_timeout)
-        return state.get("hash", "unknown")
+        try:
+            state = self._get("/state", self.tool_timeout)
+            return state.get("hash", "unknown")
+        except requests.RequestException:
+            return "unavailable"
 
-    def score(self) -> Dict[str, Any]:
-        """Programmatic multi-factor reward evaluation.
+    def score(self, model_turns: Optional[int] = None) -> Dict[str, Any]:
+        """Programmatic multi-factor reward evaluation with dual telemetry verification.
         
         Calculates:
           1. Remediation Progress Factor (P in [0.0, 1.0])
           2. SLO Health (p99 latency <= 100ms, error rate <= 0.1%)
           3. Platform Stability / Non-Target Regression Score
           4. Budget Preservation (staying within $150.00 operating budget)
-          5. Action Efficiency (minimizing redundant iterations)
+          5. Action Efficiency (measuring total model turns & mutations)
         """
         if self.task is None:
             return {"total": 0.0}
 
-        state = self._get("/state", self.verify_timeout)
+        try:
+            state = self._get("/state", self.verify_timeout)
+        except requests.RequestException as exc:
+            return {
+                "total": 0.0,
+                "error": f"Scoring communication error: {exc}",
+                "slo_recovery": 0.0,
+                "no_regressions": 0.0,
+                "budget_preservation": 0.0,
+                "efficiency": 0.0,
+            }
+
         services = state.get("services", {})
         cost_spent = float(state.get("cost_spent", 0.0))
         action_count = int(state.get("action_count", 0))
         reg_score = float(state.get("regression_score", 1.0))
+        telemetry = state.get("telemetry", {})
 
         is_resolved, error_rate, latency_ms, progress = self.task.evaluate_resolution(services, cost_spent)
+
+        # Telemetry consistency verification: If live telemetry shows severe error rates, resolution cannot pass
+        if telemetry:
+            target_services = self.task.scenario_spec.get("target_services", [])
+            for ts in target_services:
+                if ts in telemetry:
+                    tel_err = telemetry[ts].get("errors", 0.0)
+                    tel_lat = telemetry[ts].get("latency", 0.0)
+                    if tel_err > 1.0 or tel_lat > 300.0:
+                        is_resolved = False
+                        progress = min(progress, 0.4)
+                        error_rate = max(error_rate, tel_err)
+                        latency_ms = max(latency_ms, tel_lat)
 
         if progress <= 0.0:
             return {
@@ -105,11 +136,12 @@ class Env:
             bud_score = max(0.0, 1.0 - (cost_spent - 50.0) / 100.0)
 
         # Action Efficiency Factor [0.0 - 1.0]
-        # Optimal <= 8 actions, linear decline up to 40 actions
-        if action_count <= 8:
+        # Measures total model turns and mutations; optimal <= 8 turns, linear decline up to 40
+        eff_turns = max(action_count, model_turns or 0)
+        if eff_turns <= 8:
             eff_score = 1.0
         else:
-            eff_score = max(0.0, 1.0 - (action_count - 8) / 32.0)
+            eff_score = max(0.0, 1.0 - (eff_turns - 8) / 32.0)
 
         p_mult = float(progress)
         c_slo = round(0.45 * slo_score * p_mult, 4)

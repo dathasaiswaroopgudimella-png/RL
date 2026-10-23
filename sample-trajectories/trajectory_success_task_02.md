@@ -14,7 +14,7 @@ In this trajectory, `gpt-6-luna` responds to an urgent alert on `order-service` 
 
 ## SRE Post-Mortem & Diagnostic Analysis
 
-**Root Cause**: Faulty container release `v2.4.1` on `order-service` introduced regression errors (18.4% HTTP 500s).
+**Root Cause**: Faulty container release `v2.4.2` on `order-service` introduced regression errors (18.4% HTTP 500s).
 
 **Mitigation Execution**: The agent issued `rollback_release` specifying target version `v2.4.0`. The simulation updated container images across all 3 order-service pods without causing service interruptions.
 

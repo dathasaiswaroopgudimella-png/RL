@@ -54,7 +54,7 @@ TOOLS: List[Dict[str, Any]] = [
                     },
                     "filter": {
                         "type": "string",
-                        "description": "Optional substring/regex filter for log messages (e.g. error, Exception, pool, timeout).",
+                        "description": "Optional case-insensitive substring filter for log messages (e.g. error, Exception, pool, timeout).",
                     },
                 },
             },
@@ -117,7 +117,7 @@ TOOLS: List[Dict[str, Any]] = [
                     },
                     "key": {
                         "type": "string",
-                        "description": "Configuration key (e.g. db_pool_size, circuit_breaker_enabled, timeout_ms, lock_timeout_ms).",
+                        "description": "Configuration key valid for target service (e.g. db_pool_size, circuit_breaker_enabled, timeout_ms, lock_timeout_ms).",
                     },
                     "value": {
                         "description": "New configuration value (integer, boolean, or string).",
@@ -137,11 +137,11 @@ TOOLS: List[Dict[str, Any]] = [
                 "properties": {
                     "service": {
                         "type": "string",
-                        "description": "Target microservice name.",
+                        "description": "Target microservice name supporting route split (order-service).",
                     },
                     "weight": {
                         "type": "integer",
-                        "description": "Traffic percentage (0 to 100). 0 drains traffic from the service route.",
+                        "description": "Traffic percentage (0 to 100). 0 drains traffic from the canary route.",
                     },
                 },
             },
@@ -163,6 +163,15 @@ TOOLS: List[Dict[str, Any]] = [
 
 SPECS: Dict[str, Dict[str, Any]] = {t["function"]["name"]: t["function"]["parameters"] for t in TOOLS}
 TOOL_NAMES: List[str] = list(SPECS.keys())
+
+SERVICE_ALLOWED_CONFIGS = {
+    "inventory-service": {"db_pool_size", "db_timeout_ms"},
+    "db-primary": {"lock_timeout_ms", "max_connections", "shared_buffers_mb"},
+    "payment-service": {"gateway_timeout_ms", "circuit_breaker_enabled", "retry_attempts"},
+    "order-service": {"max_threads", "timeout_ms", "circuit_breaker"},
+    "api-gateway": {"rate_limit_rps", "timeout_ms"},
+    "recommendation-service": {"cache_enabled", "batch_size"},
+}
 
 
 def check_args(name: str, args: Any) -> Optional[str]:
@@ -195,16 +204,23 @@ def check_args(name: str, args: Any) -> Optional[str]:
             if not isinstance(val, bool):
                 return f"argument '{key}' must be a boolean"
 
+    # Specific key-value validation for query_metrics
+    if name == "query_metrics":
+        metric = args.get("metric", "latency")
+        if metric.lower() not in ("latency", "errors", "cpu", "memory", "qps", "rps"):
+            return f"metric '{metric}' is not supported. Must be one of: latency, errors, cpu, memory, qps, rps"
+
     # Specific key-value validation for update_config
     if name == "update_config":
+        svc = args.get("service")
         cfg_key = args.get("key")
         val = args.get("value")
-        ALLOWED_KEYS = {
-            "db_pool_size", "lock_timeout_ms", "gateway_timeout_ms", "timeout_ms",
-            "max_connections", "rate_limit_rps", "circuit_breaker_enabled", "cache_enabled",
-        }
-        if cfg_key not in ALLOWED_KEYS:
-            return f"configuration key '{cfg_key}' is not allowed. Allowed: {sorted(list(ALLOWED_KEYS))}"
+
+        if svc in SERVICE_ALLOWED_CONFIGS:
+            allowed_for_svc = SERVICE_ALLOWED_CONFIGS[svc]
+            if cfg_key not in allowed_for_svc:
+                return f"configuration key '{cfg_key}' is not configurable on '{svc}'. Allowed: {sorted(list(allowed_for_svc))}"
+
         if cfg_key in ("circuit_breaker_enabled", "cache_enabled"):
             if not isinstance(val, bool) and val not in ("true", "false", "True", "False"):
                 return f"argument 'value' for '{cfg_key}' must be a boolean"
