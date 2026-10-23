@@ -59,8 +59,8 @@ def compute_service_metrics(world: CloudMeshWorld, service_name: str, metric_typ
         if cache_reps < 2 and cache_mem < 8192:
             if service_name in ("cache-cluster", "db-primary", "order-service"):
                 base_cpu = 96.5 if service_name == "db-primary" else 88.0
-                base_latency = 1180.0 if service_name in ("db-primary", "order-service") else 450.0
-                base_error_rate = 4.8 if service_name == "order-service" else 0.5
+                base_latency = 1180.0
+                base_error_rate = 4.8
         else:
             # Resolved: cache capacity restored
             base_cpu = 42.0

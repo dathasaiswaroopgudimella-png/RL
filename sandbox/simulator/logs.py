@@ -152,6 +152,9 @@ def generate_service_logs(world: CloudMeshWorld, service_name: str, filter_str: 
             f'INFO  [{service_name}] Request throughput: 1,200 RPS, error_rate=0.04%, p99=48ms',
         ]
 
+    if hasattr(svc, "custom_logs") and svc.custom_logs:
+        lines.extend(svc.custom_logs)
+
     if filter_str:
         f_lower = filter_str.lower()
         lines = [line for line in lines if f_lower in line.lower()]

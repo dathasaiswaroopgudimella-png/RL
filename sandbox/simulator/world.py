@@ -37,6 +37,7 @@ class ServiceState:
     traffic_weight: int = 100
     config: Dict[str, Any] = field(default_factory=dict)
     dependencies: List[str] = field(default_factory=list)
+    custom_logs: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
