@@ -244,13 +244,22 @@ def run_episode(
             elif (problem := check_args(call.name, args)):
                 result = f"error: {problem}"
                 record["errors"].append({"kind": "invalid_arguments", "detail": f"{call.name}: {problem}"})
+            tool_rem = max_seconds - (time.monotonic() - started) if started else max_seconds
+            if tool_rem <= 0:
+                termination = "time_cap"
+                result = "not run: episode wall-clock time limit reached"
+                record["errors"].append({"kind": "time_limit_exceeded", "detail": "Wall-clock time limit reached"})
+                result = clip_output(result, limits.max_output_chars)
+                record["tool_result"].append(result)
+                messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
+                break
             elif call.name == "finish":
                 finished = True
-                result, is_error = env.step("finish", {})
+                result, is_error = env.step("finish", {}, timeout=min(env.tool_timeout, max(1, int(tool_rem))))
                 if is_error:
                     record["errors"].append({"kind": "tool_error", "detail": result})
             else:
-                result, is_error = env.step(call.name, args)
+                result, is_error = env.step(call.name, args, timeout=min(env.tool_timeout, max(1, int(tool_rem))))
                 if is_error:
                     record["errors"].append({"kind": "tool_error", "detail": result})
 

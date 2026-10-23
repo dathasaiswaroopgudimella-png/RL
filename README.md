@@ -115,9 +115,10 @@ task_07_cost_slo_rescue      oracle 1.00 [PASS]   no-op 0.00 [PASS]
 task_08_migration_lock       oracle 1.00 [PASS]   no-op 0.00 [PASS]
 ```
 
-- **Pre-Flight Execution Time**: **2.53 seconds** (budget: 120s).
-- **Oracle Baseline**: **100% PASS** ($\ge 0.95$ across all tasks).
+- **Pre-Flight Execution Time**: **2.30 seconds** (budget: 120s).
+- **Oracle Baseline**: **100% PASS** ($\ge 0.95$ across all tasks; mean: 0.999).
 - **No-Op Baseline**: **100% PASS** ($0.0000 \le 0.05$ across all tasks).
+- **Automated Test Suite**: **28 unit, integration, and adversarial tests** passing in 7.56s (`pytest tests/ -v`).
 
 ---
 

@@ -166,7 +166,7 @@ class CloudMeshWorld:
             "task_07_cost_slo_rescue": {"api-gateway", "order-service", "db-replica"},
             "task_08_migration_lock": {"db-primary"},
         }
-        target_services = TARGET_MAP.get(task_id, set())
+        target_services = TARGET_MAP.get(task_id, set(incident.get("target_services", [])))
 
         penalties = 0.0
         for name, svc in self.services.items():
@@ -183,15 +183,15 @@ class CloudMeshWorld:
                 continue
 
             # Penalty if unneeded downscaling happened on an unaffected service
-            if svc.replicas < base.get("replicas", 2) and task_id != "task_07_cost_slo_rescue":
+            if svc.replicas < base.get("replicas", 2):
                 penalties += 0.25
 
             # Penalty if a non-target service's stable version was modified
-            if svc.version != base.get("version", "") and task_id != "task_02_bad_deployment":
+            if svc.version != base.get("version", ""):
                 penalties += 0.35
 
             # Penalty if traffic was drained from an unaffected route
-            if svc.traffic_weight == 0 and task_id != "task_06_canary_leak":
+            if svc.traffic_weight == 0:
                 penalties += 0.40
 
             # Config regression check: penalize unauthorized config mutations on non-target services
@@ -223,6 +223,8 @@ class CloudMeshWorld:
 
     def deduct_cost(self, amount: float) -> Tuple[bool, str]:
         """Deducts operational cost from remediation budget."""
+        if self.finished:
+            return True, ""
         if self.cost_spent + amount > self.BUDGET_MAX:
             return False, f"Action denied: cost ${amount:.2f} exceeds remaining budget (${self.BUDGET_MAX - self.cost_spent:.2f} left)."
         self.cost_spent += amount

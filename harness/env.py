@@ -51,10 +51,11 @@ class Env:
             "and call `finish` when the incident is resolved."
         )
 
-    def step(self, name: str, args: Dict[str, Any]) -> Tuple[str, bool]:
+    def step(self, name: str, args: Dict[str, Any], timeout: Optional[int] = None) -> Tuple[str, bool]:
         """Executes a single operational tool call with network exception isolation."""
         try:
-            result = self._post("/tool", {"name": name, "args": args}, self.tool_timeout)
+            t = timeout if timeout is not None else self.tool_timeout
+            result = self._post("/tool", {"name": name, "args": args}, t)
             return result.get("output", ""), result.get("is_error", False)
         except requests.RequestException as exc:
             return f"error: sandbox communication failure: {exc}", True
@@ -100,18 +101,26 @@ class Env:
 
         is_resolved, error_rate, latency_ms, progress = self.task.evaluate_resolution(services, cost_spent)
 
-        # Telemetry consistency verification: If live telemetry shows severe error rates, resolution cannot pass
+        # Telemetry consistency verification: If live telemetry shows SLO violations, clamp progress
         if telemetry:
             target_services = self.task.scenario_spec.get("target_services", [])
             for ts in target_services:
                 if ts in telemetry:
                     tel_err = telemetry[ts].get("errors", 0.0)
                     tel_lat = telemetry[ts].get("latency", 0.0)
-                    if tel_err > 1.0 or tel_lat > 300.0:
+                    if tel_err > 0.10 or tel_lat > 100.0:
                         is_resolved = False
-                        progress = min(progress, 0.4)
+                        progress = min(progress, 0.40)
                         error_rate = max(error_rate, tel_err)
                         latency_ms = max(latency_ms, tel_lat)
+
+        # Mathematical SLO Gating: Full resolution (progress = 1.0) strictly requires meeting SLOs
+        # (error_rate <= 0.10% and latency_ms <= 100.0ms).
+        # If either SLO is breached, resolution fails and progress is capped at 0.40,
+        # guaranteeing the total score can never exceed 0.40.
+        if error_rate > 0.10 or latency_ms > 100.0:
+            is_resolved = False
+            progress = min(progress, 0.40)
 
         if progress <= 0.0:
             return {
@@ -123,9 +132,17 @@ class Env:
             }
 
         # SLO Recovery Factor [0.0 - 1.0]
-        # Target: error_rate <= 0.1%, latency <= 100ms
-        err_factor = max(0.0, min(1.0, 1.0 - (error_rate / 2.0)))
-        lat_factor = max(0.0, min(1.0, 1.0 - max(0.0, latency_ms - 80.0) / 1000.0))
+        # Target: error_rate <= 0.10%, latency <= 100.0ms
+        if error_rate <= 0.10:
+            err_factor = 1.0
+        else:
+            err_factor = max(0.0, min(1.0, 1.0 - (error_rate - 0.10) / 2.0))
+
+        if latency_ms <= 100.0:
+            lat_factor = 1.0
+        else:
+            lat_factor = max(0.0, min(1.0, 1.0 - (latency_ms - 100.0) / 1000.0))
+
         slo_score = 0.5 * err_factor + 0.5 * lat_factor
 
         # Budget Preservation Factor [0.0 - 1.0]

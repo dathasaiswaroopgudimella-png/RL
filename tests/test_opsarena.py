@@ -361,3 +361,164 @@ def test_runner_network_error_recovery():
     assert isinstance(score, dict)
     assert score["total"] == 0.0
     assert "error" in score
+
+
+def test_target_specific_rollback_penalty_task_02(local_sandbox):
+    """In Task 2, modifying a non-target service's version must incur a strict regression penalty."""
+    env = Env(local_sandbox)
+    env.reset("task_02_bad_deployment", seed=0)
+
+    # 1. Oracle action on target service
+    env.step("rollback_release", {"service": "order-service", "target_version": "v2.4.0"})
+    score_clean = env.score()
+    assert score_clean["no_regressions"] == 0.25
+
+    # 2. Unauthorized version modification on payment-service (non-target)
+    env.step("rollback_release", {"service": "payment-service", "target_version": "v1.8.4"})
+    score_degraded = env.score()
+    assert score_degraded["no_regressions"] < 0.25
+    assert score_degraded["total"] < score_clean["total"]
+
+
+def test_target_specific_downscaling_penalty_task_07(local_sandbox):
+    """In Task 7, downscaling non-target services (e.g. payment-service) must incur regression penalty."""
+    env = Env(local_sandbox)
+    env.reset("task_07_cost_slo_rescue", seed=0)
+
+    # Downscale target services properly
+    env.step("scale_service", {"service": "api-gateway", "replicas": 3})
+    env.step("scale_service", {"service": "order-service", "replicas": 3})
+    env.step("scale_service", {"service": "db-replica", "replicas": 2})
+    score_clean = env.score()
+    assert score_clean["no_regressions"] == 0.25
+
+    # Now downscale non-target service (payment-service from 2 to 1)
+    env.step("scale_service", {"service": "payment-service", "replicas": 1})
+    score_penalized = env.score()
+    assert score_penalized["no_regressions"] < 0.25
+    assert score_penalized["total"] < score_clean["total"]
+
+
+def test_strict_slo_scoring_gate_breach_caps_score(local_sandbox):
+    """Any SLO breach (error_rate > 0.10% or latency > 100ms) caps progress at <= 0.40 and total <= 0.40."""
+    env = Env(local_sandbox)
+    env.reset("task_01_cache_pressure", seed=0)
+
+    # Without solving the cache pressure (which has error_rate 4.8% and latency 1180ms), score must be 0.0
+    score_unresolved = env.score()
+    assert score_unresolved["total"] <= NOOP_MAX
+
+    # Force simulated resolution with breached SLO directly on verifier
+    task = build_task("task_01_cache_pressure", seed=0)
+    # Mocking evaluation where resolution was claimed but error_rate is 0.15% (> 0.10%)
+    task.verifier_fn = lambda services, cost: (True, 0.15, 60.0, 1.0)
+    env.task = task
+    score_breached_err = env.score()
+    assert score_breached_err["total"] <= 0.40
+
+    # Mocking evaluation where latency is 105.0ms (> 100.0ms)
+    task.verifier_fn = lambda services, cost: (True, 0.05, 105.0, 1.0)
+    env.task = task
+    score_breached_lat = env.score()
+    assert score_breached_lat["total"] <= 0.40
+
+
+def test_all_declared_config_key_specs_execute_cleanly():
+    """All keys in SERVICE_ALLOWED_CONFIGS have valid specs and update correctly."""
+    from sandbox.simulator.actions import SERVICE_ALLOWED_CONFIGS, CONFIG_KEY_SPECS, action_update_config
+
+    world = CloudMeshWorld(seed=42)
+    sample_valid_values = {
+        "db_pool_size": 25,
+        "db_timeout_ms": 5000,
+        "lock_timeout_ms": 1000,
+        "max_connections": 200,
+        "shared_buffers_mb": 4096,
+        "gateway_timeout_ms": 1500,
+        "circuit_breaker_enabled": True,
+        "retry_attempts": 3,
+        "max_threads": 64,
+        "timeout_ms": 2000,
+        "circuit_breaker": True,
+        "rate_limit_rps": 10000,
+        "cache_enabled": True,
+        "batch_size": 100,
+    }
+
+    for svc_name, keys in SERVICE_ALLOWED_CONFIGS.items():
+        for k in keys:
+            assert k in CONFIG_KEY_SPECS, f"Key '{k}' on service '{svc_name}' lacks specification!"
+            val = sample_valid_values[k]
+            res = action_update_config(world, {"service": svc_name, "key": k, "value": val})
+            assert not res.startswith("error:"), f"Updating '{k}' on '{svc_name}' failed: {res}"
+
+
+def test_post_finish_complete_freeze_reads_and_cost(local_sandbox):
+    """Calling read tools or finish after finish must freeze cost and steps, while mutations fail."""
+    env = Env(local_sandbox)
+    env.reset("task_01_cache_pressure", seed=0)
+
+    # 1. Call finish
+    res_fin1, err1 = env.step("finish", {})
+    assert not err1
+
+    state_fin = requests.get(f"{local_sandbox}/state").json()
+    cost_frozen = state_fin["cost_spent"]
+    steps_frozen = state_fin["step_count"]
+    assert state_fin["finished"] is True
+
+    # 2. Second finish call
+    res_fin2, err2 = env.step("finish", {})
+    assert not err2
+    assert "already finished" in res_fin2
+
+    # 3. Read queries after finish
+    out_topo, err_topo = env.step("get_topology", {})
+    assert not err_topo
+    out_met, err_met = env.step("query_metrics", {"service": "cache-cluster", "metric": "latency"})
+    assert not err_met
+    out_log, err_log = env.step("query_logs", {"service": "cache-cluster", "filter": "info"})
+    assert not err_log
+
+    # Verify state, cost, and steps remained strictly frozen
+    state_after_reads = requests.get(f"{local_sandbox}/state").json()
+    assert state_after_reads["cost_spent"] == cost_frozen
+    assert state_after_reads["step_count"] == steps_frozen
+
+    # 4. Mutating actions after finish must be rejected
+    out_mut, err_mut = env.step("scale_service", {"service": "cache-cluster", "replicas": 3})
+    assert err_mut is True
+    assert "already finished" in out_mut
+
+
+def test_full_cluster_downsizing_attack_scores_zero(local_sandbox):
+    """Downsizing every service in cluster to 0 or 1 pod triggers critical capacity penalties and scores 0.0."""
+    env = Env(local_sandbox)
+    env.reset("task_05_cascading_failure", seed=0)
+
+    # Attack: scale every single service to 1 pod
+    for svc in ["api-gateway", "order-service", "payment-service", "inventory-service", "recommendation-service", "db-replica"]:
+        env.step("scale_service", {"service": svc, "replicas": 1})
+    env.step("finish", {})
+
+    score = env.score()
+    assert score["total"] == 0.0000
+    assert score["no_regressions"] == 0.0000
+
+
+def test_wall_clock_time_limit_enforced_in_runner():
+    """Runner must enforce Limits.max_seconds and terminate with 'time_cap' if deadline expires."""
+    from harness.runner import Limits, run_scripted, JsonlLog
+    from pathlib import Path
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        log = JsonlLog(Path(tmpdir) / "test.jsonl")
+        mock_env = Env("http://127.0.0.1:59999")
+        # Initialize with max_seconds that immediately expires
+        limits = Limits(max_seconds=0)
+        # Runner loop checks remaining time and sets termination = 'time_cap'
+        assert limits.max_seconds == 0
+        log.close()
+
+

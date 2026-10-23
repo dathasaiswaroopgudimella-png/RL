@@ -21,13 +21,19 @@ SERVICE_ALLOWED_CONFIGS = {
 
 CONFIG_KEY_SPECS = {
     "db_pool_size": {"type": int, "min": 1, "max": 100, "desc": "integer between 1 and 100"},
+    "db_timeout_ms": {"type": int, "min": 100, "max": 30000, "desc": "integer between 100 and 30000"},
     "lock_timeout_ms": {"type": int, "min": 0, "max": 60000, "desc": "integer between 0 and 60000"},
     "gateway_timeout_ms": {"type": int, "min": 100, "max": 30000, "desc": "integer between 100 and 30000"},
     "timeout_ms": {"type": int, "min": 100, "max": 30000, "desc": "integer between 100 and 30000"},
     "max_connections": {"type": int, "min": 1, "max": 1000, "desc": "integer between 1 and 1000"},
+    "shared_buffers_mb": {"type": int, "min": 128, "max": 16384, "desc": "integer between 128 and 16384"},
+    "retry_attempts": {"type": int, "min": 0, "max": 10, "desc": "integer between 0 and 10"},
+    "max_threads": {"type": int, "min": 1, "max": 500, "desc": "integer between 1 and 500"},
     "rate_limit_rps": {"type": int, "min": 100, "max": 50000, "desc": "integer between 100 and 50000"},
     "circuit_breaker_enabled": {"type": bool, "desc": "boolean true or false"},
+    "circuit_breaker": {"type": bool, "desc": "boolean true or false"},
     "cache_enabled": {"type": bool, "desc": "boolean true or false"},
+    "batch_size": {"type": int, "min": 1, "max": 1000, "desc": "integer between 1 and 1000"},
 }
 
 ALLOWED_RELEASES = {
@@ -38,11 +44,11 @@ ALLOWED_RELEASES = {
 
 
 def action_get_topology(world: CloudMeshWorld, args: Dict[str, Any]) -> str:
-    ok, err = world.deduct_cost(1.0)
-    if not ok:
-        return f"error: {err}"
-
-    world.step_count += 1
+    if not world.finished:
+        ok, err = world.deduct_cost(1.0)
+        if not ok:
+            return f"error: {err}"
+        world.step_count += 1
     topo = {}
     for name, s in world.services.items():
         topo[name] = {
@@ -70,11 +76,11 @@ def action_query_metrics(world: CloudMeshWorld, args: Dict[str, Any]) -> str:
     if norm_metric not in valid_metrics:
         return f"error: invalid metric '{metric}'. Must be one of: latency, errors, cpu, memory, rps, qps"
 
-    ok, err = world.deduct_cost(2.0)
-    if not ok:
-        return f"error: {err}"
-
-    world.step_count += 1
+    if not world.finished:
+        ok, err = world.deduct_cost(2.0)
+        if not ok:
+            return f"error: {err}"
+        world.step_count += 1
     res = compute_service_metrics(world, service, metric)
     history_str = ", ".join(res["history"])
     return f"Service '{service}' metric '{metric}' (status: {res['status']}):\n" \
@@ -90,11 +96,11 @@ def action_query_logs(world: CloudMeshWorld, args: Dict[str, Any]) -> str:
     if service not in world.services:
         return f"error: unknown service '{service}'. Available: {sorted(list(world.services.keys()))}"
 
-    ok, err = world.deduct_cost(3.0)
-    if not ok:
-        return f"error: {err}"
-
-    world.step_count += 1
+    if not world.finished:
+        ok, err = world.deduct_cost(3.0)
+        if not ok:
+            return f"error: {err}"
+        world.step_count += 1
     lines = generate_service_logs(world, service, filter_str)
     return f"Log tail for '{service}' (matching filter '{filter_str or '*'}'):\n" + "\n".join(lines)
 
@@ -231,6 +237,8 @@ def action_reroute_traffic(world: CloudMeshWorld, args: Dict[str, Any]) -> str:
 
 
 def action_finish(world: CloudMeshWorld, args: Dict[str, Any]) -> str:
+    if world.finished:
+        return "Incident mitigation already finished. Telemetry verification completed."
     world.finished = True
     world.step_count += 1
     world.action_history.append({"action": "finish"})

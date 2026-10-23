@@ -199,6 +199,10 @@ def main() -> int:
     gate_duration = round(time.monotonic() - gate_start, 2)
     print(f"Pre-flight baseline checks completed in {gate_duration}s", flush=True)
 
+    if gate_duration > GATE_BUDGET_SECONDS:
+        print(f"Pre-flight baseline checks exceeded time budget ({gate_duration}s > {GATE_BUDGET_SECONDS}s)", flush=True)
+        passed = False
+
     (out / "gate.json").write_text(
         json.dumps({"seed": seed, "passed": passed, "gate_seconds": gate_duration, "tasks": rows}, indent=2),
         encoding="utf-8",

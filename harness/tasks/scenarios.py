@@ -274,10 +274,13 @@ def build_canary_leak_task(seed: int) -> TaskInstance:
 
 def build_cost_slo_rescue_task(seed: int) -> TaskInstance:
     rng = random.Random(seed)
-    # Exactly 36 initial pods total:
-    # api-gateway (10) + order-service (10) + db-replica (8) + payment-service (2) +
-    # inventory-service (2) + recommendation-service (2) + cache-cluster (1) + db-primary (1) = 36 pods
-    # Burn rate: 36 * $15/hr = $540/hr
+    gw_pods = rng.choice([10, 12])
+    order_pods = rng.choice([10, 12])
+    replica_pods = rng.choice([8, 10])
+    # Baseline non-target replicas:
+    # payment-service (2) + inventory-service (2) + recommendation-service (2) + cache-cluster (1) + db-primary (1) = 8
+    initial_pods = gw_pods + order_pods + replica_pods + 8
+    burn_rate = initial_pods * 15  # $15/hr per pod ($540/hr to $630/hr)
 
     def verify(services: Dict[str, Any], cost_spent: float) -> Tuple[bool, float, float, float]:
         total_replicas = sum(s.get("replicas", 0) for s in services.values())
@@ -289,7 +292,7 @@ def build_cost_slo_rescue_task(seed: int) -> TaskInstance:
             return False, 18.5, 1250.0, 0.0
 
         is_resolved = bool(total_replicas <= 18)
-        progress = 1.0 if is_resolved else min(0.5, max(0.0, (36 - total_replicas) / 18.0 * 0.5))
+        progress = 1.0 if is_resolved else min(0.5, max(0.0, (initial_pods - total_replicas) / (initial_pods - 18.0) * 0.5))
         error_rate = 0.04
         latency = 55.0
         return is_resolved, error_rate, latency, progress
@@ -299,19 +302,24 @@ def build_cost_slo_rescue_task(seed: int) -> TaskInstance:
         title="Overprovisioned Financial Drain",
         difficulty="hard",
         instructions=(
-            "Production alert: Infrastructure billing reports show severe over-provisioning across multiple service tiers "
-            "with cluster CPU utilization averaging under 15% ($540/hr burn rate). Audit service topologies and right-size "
-            "the over-allocated services to bring total cluster pods to 18 or fewer, while preserving sufficient capacity "
-            "for all services to meet the < 100ms latency and < 0.1% error rate SLOs."
+            f"Production alert: Infrastructure billing reports show severe over-provisioning across multiple service tiers "
+            f"with cluster CPU utilization averaging under 15% (${burn_rate}/hr burn rate). Audit service topologies and right-size "
+            f"the over-allocated services to bring total cluster pods to 18 or fewer, while preserving sufficient capacity "
+            f"for all services to meet the < 100ms latency and < 0.1% error rate SLOs."
         ),
         scenario_spec={
             "task_id": "task_07_cost_slo_rescue",
             "seed": seed,
+            "gw_pods": gw_pods,
+            "order_pods": order_pods,
+            "replica_pods": replica_pods,
+            "initial_pods": initial_pods,
+            "burn_rate": burn_rate,
             "target_services": ["api-gateway", "order-service", "db-replica"],
             "service_overrides": {
-                "api-gateway": {"replicas": 10},
-                "order-service": {"replicas": 10},
-                "db-replica": {"replicas": 8},
+                "api-gateway": {"replicas": gw_pods},
+                "order-service": {"replicas": order_pods},
+                "db-replica": {"replicas": replica_pods},
                 "cache-cluster": {"replicas": 1},
             },
         },
