@@ -1,0 +1,12 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+logs/*
+!logs/.gitkeep
+inputs/*
+!inputs/.gitkeep
+!inputs/README.md
+organizer-template/
+test_workspace/

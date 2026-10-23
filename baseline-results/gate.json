@@ -1,0 +1,71 @@
+{
+  "seed": 0,
+  "passed": true,
+  "gate_seconds": 3.28,
+  "tasks": [
+    {
+      "task": "task_01_cache_pressure",
+      "difficulty": "easy",
+      "oracle": 0.991,
+      "noop": 0.0,
+      "oracle_ok": true,
+      "noop_ok": true
+    },
+    {
+      "task": "task_02_bad_deployment",
+      "difficulty": "easy",
+      "oracle": 0.9955,
+      "noop": 0.0,
+      "oracle_ok": true,
+      "noop_ok": true
+    },
+    {
+      "task": "task_03_db_pool_exhaustion",
+      "difficulty": "medium",
+      "oracle": 0.9932,
+      "noop": 0.0,
+      "oracle_ok": true,
+      "noop_ok": true
+    },
+    {
+      "task": "task_04_downstream_timeout",
+      "difficulty": "medium",
+      "oracle": 0.9944,
+      "noop": 0.0,
+      "oracle_ok": true,
+      "noop_ok": true
+    },
+    {
+      "task": "task_05_cascading_failure",
+      "difficulty": "hard",
+      "oracle": 0.9831,
+      "noop": 0.0,
+      "oracle_ok": true,
+      "noop_ok": true
+    },
+    {
+      "task": "task_06_canary_leak",
+      "difficulty": "medium",
+      "oracle": 0.9944,
+      "noop": 0.0,
+      "oracle_ok": true,
+      "noop_ok": true
+    },
+    {
+      "task": "task_07_cost_slo_rescue",
+      "difficulty": "hard",
+      "oracle": 0.9955,
+      "noop": 0.0,
+      "oracle_ok": true,
+      "noop_ok": true
+    },
+    {
+      "task": "task_08_migration_lock",
+      "difficulty": "hard",
+      "oracle": 0.991,
+      "noop": 0.0,
+      "oracle_ok": true,
+      "noop_ok": true
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+.git
+.gitignore
+.env
+.env.example
+logs/
+inputs/
+organizer-template/
+tests/
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache/
+*.md

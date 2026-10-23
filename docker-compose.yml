@@ -1,0 +1,51 @@
+# Confluentia × 2une.ai RL Hackathon: OpsArena Submission Container
+# Team: team_087
+#
+# Single-command evaluation:
+#   docker compose up --build --abort-on-container-exit --exit-code-from harness
+
+name: team_087
+
+services:
+  sandbox:
+    build:
+      context: .
+      dockerfile: Dockerfile.sandbox
+    networks: [isolated]
+    init: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  harness:
+    build:
+      context: .
+      dockerfile: Dockerfile.harness
+    depends_on:
+      sandbox:
+        condition: service_healthy
+    networks: [isolated, internet]
+    environment:
+      MODEL: ${MODEL:-gpt-6-luna}
+      API_KEY: ${API_KEY:-}
+      BASE_URL: ${BASE_URL:-}
+      MAX_TOKENS: ${MAX_TOKENS:-}
+      TASK_ID: ${TASK_ID:-task_02_bad_deployment}
+      SEED: ${SEED:-0}
+      MODE: ${MODE:-full}
+      APPEND_FILE: ${APPEND_FILE:-}
+      SANDBOX_URL: http://sandbox:8000
+    volumes:
+      - ./logs:/app/logs
+      - ./inputs:/app/inputs:ro
+
+networks:
+  isolated:
+    internal: true
+  internet: {}
