@@ -11,6 +11,7 @@ import random
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+
 @dataclass
 class ServiceState:
     name: str
@@ -38,6 +39,7 @@ class ServiceState:
             "dependencies": list(self.dependencies),
         }
 
+
 class CloudMeshWorld:
     """Deterministic, discrete-event world model for cloud operations."""
 
@@ -47,45 +49,45 @@ class CloudMeshWorld:
         "api-gateway": ServiceState(
             name="api-gateway", tier="edge", replicas=3, version="v2.4.0",
             config={"rate_limit_rps": 5000, "timeout_ms": 2500},
-            dependencies=["order-service", "recommendation-service"]
+            dependencies=["order-service", "recommendation-service"],
         ),
         "order-service": ServiceState(
             name="order-service", tier="app", replicas=3, version="v2.4.0",
             config={"max_threads": 200, "timeout_ms": 1500, "circuit_breaker": False},
-            dependencies=["payment-service", "inventory-service", "cache-cluster"]
+            dependencies=["payment-service", "inventory-service", "cache-cluster"],
         ),
         "payment-service": ServiceState(
             name="payment-service", tier="app", replicas=2, version="v1.9.0",
             config={"gateway_timeout_ms": 3000, "circuit_breaker_enabled": False, "retry_attempts": 3},
-            dependencies=["db-primary"]
+            dependencies=["db-primary"],
         ),
         "inventory-service": ServiceState(
             name="inventory-service", tier="app", replicas=2, version="v3.1.2",
             config={"db_pool_size": 25, "db_timeout_ms": 800},
-            dependencies=["db-primary", "db-replica"]
+            dependencies=["db-primary", "db-replica"],
         ),
         "recommendation-service": ServiceState(
             name="recommendation-service", tier="app", replicas=2, version="v1.2.0",
             config={"cache_enabled": True, "batch_size": 32},
-            dependencies=["cache-cluster"]
+            dependencies=["cache-cluster"],
         ),
         "cache-cluster": ServiceState(
             name="cache-cluster", tier="cache", replicas=2, version="v7.2-redis",
             memory_limit_mb=4096,
             config={"maxmemory_policy": "allkeys-lru", "eviction_active": False},
-            dependencies=[]
+            dependencies=[],
         ),
         "db-primary": ServiceState(
             name="db-primary", tier="data", replicas=1, version="postgres-16",
             cpu_limit_cores=4.0, memory_limit_mb=8192,
             config={"max_connections": 100, "shared_buffers_mb": 2048, "lock_timeout_ms": 5000},
-            dependencies=[]
+            dependencies=[],
         ),
         "db-replica": ServiceState(
             name="db-replica", tier="data", replicas=2, version="postgres-16",
             cpu_limit_cores=2.0, memory_limit_mb=4096,
             config={"max_connections": 100, "read_only": True},
-            dependencies=[]
+            dependencies=[],
         ),
     }
 
@@ -94,6 +96,7 @@ class CloudMeshWorld:
         self.rng = random.Random(seed)
         self.services: Dict[str, ServiceState] = {}
         self.active_incident: Optional[Dict[str, Any]] = None
+        self.baseline_health: Dict[str, Dict[str, Any]] = {}
         self.cost_spent: float = 0.0
         self.step_count: int = 0
         self.finished: bool = False
@@ -102,6 +105,7 @@ class CloudMeshWorld:
 
     def _init_defaults(self):
         self.services = {name: copy.deepcopy(s) for name, s in self.DEFAULT_SERVICES.items()}
+        self.baseline_health = {name: s.to_dict() for name, s in self.services.items()}
         self.cost_spent = 0.0
         self.step_count = 0
         self.finished = False
@@ -122,11 +126,60 @@ class CloudMeshWorld:
                     svc.version = overrides["version"]
                 if "memory_limit_mb" in overrides:
                     svc.memory_limit_mb = overrides["memory_limit_mb"]
+                if "circuit_breaker_enabled" in overrides:
+                    svc.circuit_breaker_enabled = overrides["circuit_breaker_enabled"]
+                if "traffic_weight" in overrides:
+                    svc.traffic_weight = overrides["traffic_weight"]
                 if "config" in overrides:
                     svc.config.update(overrides["config"])
 
+        # Capture post-override baseline for non-target regression checks
+        self.baseline_health = {name: s.to_dict() for name, s in self.services.items()}
+
+    def compute_regression_score(self) -> float:
+        """Evaluates whether any non-target service was degraded, drained, or broken.
+        Returns 1.0 if perfectly stable, down to 0.0 if regressions are caused.
+        """
+        incident = self.active_incident or {}
+        task_id = incident.get("task_id", "")
+
+        TARGET_MAP = {
+            "task_01_cache_pressure": {"cache-cluster"},
+            "task_02_bad_deployment": {"order-service"},
+            "task_03_db_pool_exhaustion": {"inventory-service"},
+            "task_04_downstream_timeout": {"payment-service"},
+            "task_05_cascading_failure": {"order-service"},
+            "task_06_canary_leak": {"order-service"},
+            "task_07_cost_slo_rescue": {"api-gateway", "order-service", "db-replica"},
+            "task_08_migration_lock": {"db-primary"},
+        }
+        target_services = TARGET_MAP.get(task_id, set())
+
+        penalties = 0.0
+        for name, svc in self.services.items():
+            if name in target_services:
+                continue
+            base = self.baseline_health.get(name, {})
+
+            # Severe penalty if replicas drained below 1
+            if svc.replicas < 1:
+                penalties += 0.50
+            # Penalty if unneeded downscaling happened on an active service
+            elif svc.replicas < base.get("replicas", 2) and task_id != "task_07_cost_slo_rescue":
+                penalties += 0.25
+
+            # Penalty if a non-target service's stable version was modified
+            if svc.version != base.get("version", "") and task_id != "task_02_bad_deployment":
+                penalties += 0.35
+
+            # Penalty if traffic was drained from an unaffected route
+            if svc.traffic_weight == 0 and task_id != "task_06_canary_leak":
+                penalties += 0.40
+
+        return max(0.0, 1.0 - penalties)
+
     def state_hash(self) -> str:
-        """Computes a deterministic hash of current topology, configurations, and fault status."""
+        """Computes a full 64-character SHA-256 hash of topology, configs, and fault state."""
         state_repr = {
             "services": {name: s.to_dict() for name, s in sorted(self.services.items())},
             "incident_id": self.active_incident.get("task_id", "") if self.active_incident else "",
@@ -134,7 +187,7 @@ class CloudMeshWorld:
             "finished": self.finished,
         }
         raw_bytes = json.dumps(state_repr, sort_keys=True).encode("utf-8")
-        return hashlib.sha256(raw_bytes).hexdigest()[:8]
+        return hashlib.sha256(raw_bytes).hexdigest()
 
     def deduct_cost(self, amount: float) -> Tuple[bool, str]:
         """Deducts operational cost from remediation budget."""

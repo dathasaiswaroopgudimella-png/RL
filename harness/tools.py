@@ -32,8 +32,8 @@ TOOLS: List[Dict[str, Any]] = [
                     },
                     "metric": {
                         "type": "string",
-                        "description": "Metric to inspect: latency, errors, cpu, memory, or qps (default: latency).",
-                        "enum": ["latency", "errors", "cpu", "memory", "qps"],
+                        "description": "Metric to inspect: latency, errors, cpu, memory, qps, or rps (default: latency).",
+                        "enum": ["latency", "errors", "cpu", "memory", "qps", "rps"],
                     },
                 },
             },
@@ -194,5 +194,22 @@ def check_args(name: str, args: Any) -> Optional[str]:
         elif expected_type == "boolean":
             if not isinstance(val, bool):
                 return f"argument '{key}' must be a boolean"
+
+    # Specific key-value validation for update_config
+    if name == "update_config":
+        cfg_key = args.get("key")
+        val = args.get("value")
+        ALLOWED_KEYS = {
+            "db_pool_size", "lock_timeout_ms", "gateway_timeout_ms", "timeout_ms",
+            "max_connections", "rate_limit_rps", "circuit_breaker_enabled", "cache_enabled",
+        }
+        if cfg_key not in ALLOWED_KEYS:
+            return f"configuration key '{cfg_key}' is not allowed. Allowed: {sorted(list(ALLOWED_KEYS))}"
+        if cfg_key in ("circuit_breaker_enabled", "cache_enabled"):
+            if not isinstance(val, bool) and val not in ("true", "false", "True", "False"):
+                return f"argument 'value' for '{cfg_key}' must be a boolean"
+        elif cfg_key in ("db_pool_size", "lock_timeout_ms", "gateway_timeout_ms", "timeout_ms", "max_connections", "rate_limit_rps"):
+            if isinstance(val, bool) or not (isinstance(val, int) or (isinstance(val, str) and val.isdigit())):
+                return f"argument 'value' for '{cfg_key}' must be an integer"
 
     return None

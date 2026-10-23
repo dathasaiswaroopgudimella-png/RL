@@ -1,7 +1,7 @@
 {
   "seed": 0,
   "passed": true,
-  "gate_seconds": 0.47,
+  "gate_seconds": 0.39,
   "tasks": [
     {
       "task": "task_02_bad_deployment",

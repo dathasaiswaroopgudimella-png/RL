@@ -58,13 +58,14 @@ def do_tool(body):
         return {"output": f"error: {type(exc).__name__}: {exc}", "is_error": True}
 
 def do_state(_body=None):
-    """Returns current state snapshot, hash, and metrics for verifier scoring."""
+    """Returns current state snapshot, hash, regression score, and metrics for verifier scoring."""
     return {
         "ok": True,
         "hash": WORLD.state_hash(),
         "cost_spent": WORLD.cost_spent,
         "finished": WORLD.finished,
         "action_count": len(WORLD.action_history),
+        "regression_score": WORLD.compute_regression_score(),
         "services": {name: s.to_dict() for name, s in WORLD.services.items()},
     }
 

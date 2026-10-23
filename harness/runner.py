@@ -51,7 +51,7 @@ def show(record: Dict[str, Any]) -> None:
     tools = ",".join(a.get("tool", "?") for a in record.get("parsed_actions", [])) or "-"
     reward = record.get("reward", {}).get("total") if record.get("reward") else None
     reward_str = f"{reward:.3f}" if (reward is not None and isinstance(reward, (int, float))) else "-"
-    state_hash = record.get("state", {}).get("hash", "unknown")
+    state_hash = str(record.get("state", {}).get("hash", "unknown"))[:8]
     errors = len(record.get("errors", []))
     print(
         f"[{record.get('agent', 'agent'):<7} step {record.get('step', 0):>2}] "

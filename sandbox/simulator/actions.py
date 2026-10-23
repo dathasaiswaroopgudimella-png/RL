@@ -99,6 +99,17 @@ def action_rollback_release(world: CloudMeshWorld, args: Dict[str, Any]) -> str:
     world.action_history.append({"action": "rollback_release", "service": service, "from": prev, "to": target_version})
     return f"Deployment rollback initiated: '{service}' reverted from {prev} to {target_version} (Cost: ${cost:.2f}). Deployment healthy."
 
+CONFIG_KEY_SPECS = {
+    "db_pool_size": {"type": int, "min": 1, "max": 100, "desc": "integer between 1 and 100"},
+    "lock_timeout_ms": {"type": int, "min": 0, "max": 60000, "desc": "integer between 0 and 60000"},
+    "gateway_timeout_ms": {"type": int, "min": 100, "max": 30000, "desc": "integer between 100 and 30000"},
+    "timeout_ms": {"type": int, "min": 100, "max": 30000, "desc": "integer between 100 and 30000"},
+    "max_connections": {"type": int, "min": 1, "max": 1000, "desc": "integer between 1 and 1000"},
+    "rate_limit_rps": {"type": int, "min": 100, "max": 50000, "desc": "integer between 100 and 50000"},
+    "circuit_breaker_enabled": {"type": bool, "desc": "boolean true or false"},
+    "cache_enabled": {"type": bool, "desc": "boolean true or false"},
+}
+
 def action_update_config(world: CloudMeshWorld, args: Dict[str, Any]) -> str:
     service = args.get("service", "")
     key = args.get("key", "")
@@ -107,12 +118,38 @@ def action_update_config(world: CloudMeshWorld, args: Dict[str, Any]) -> str:
     if service not in world.services:
         return f"error: unknown service '{service}'"
 
-    ALLOWED_KEYS = {
-        "timeout_ms", "max_connections", "cache_enabled", "circuit_breaker_enabled",
-        "db_pool_size", "gateway_timeout_ms", "lock_timeout_ms", "rate_limit_rps",
-    }
-    if key not in ALLOWED_KEYS:
-        return f"error: configuration key '{key}' is not allowed or unsupported. Allowed: {sorted(list(ALLOWED_KEYS))}"
+    if key not in CONFIG_KEY_SPECS:
+        return f"error: configuration key '{key}' is not allowed or unsupported. Allowed: {sorted(list(CONFIG_KEY_SPECS.keys()))}"
+
+    spec = CONFIG_KEY_SPECS[key]
+    validated_value = None
+
+    if spec["type"] is bool:
+        if isinstance(value, bool):
+            validated_value = value
+        elif isinstance(value, str) and value.strip().lower() in ("true", "1"):
+            validated_value = True
+        elif isinstance(value, str) and value.strip().lower() in ("false", "0"):
+            validated_value = False
+        else:
+            return f"error: key '{key}' must be a boolean (got '{value}')"
+    elif spec["type"] is int:
+        if isinstance(value, bool):
+            return f"error: key '{key}' must be an integer (got boolean)"
+        parsed_val = None
+        if isinstance(value, int):
+            parsed_val = value
+        elif isinstance(value, str):
+            try:
+                parsed_val = int(value.strip())
+            except ValueError:
+                return f"error: key '{key}' must be an {spec['desc']} (got '{value}')"
+        else:
+            return f"error: key '{key}' must be an {spec['desc']} (got '{value}')"
+
+        if parsed_val < spec["min"] or parsed_val > spec["max"]:
+            return f"error: key '{key}' must be an {spec['desc']} (got {parsed_val})"
+        validated_value = parsed_val
 
     cost = 5.0
     ok, err = world.deduct_cost(cost)
@@ -120,12 +157,12 @@ def action_update_config(world: CloudMeshWorld, args: Dict[str, Any]) -> str:
         return f"error: {err}"
 
     if key == "circuit_breaker_enabled":
-        world.services[service].circuit_breaker_enabled = bool(value)
+        world.services[service].circuit_breaker_enabled = validated_value
     else:
-        world.services[service].config[key] = value
+        world.services[service].config[key] = validated_value
 
-    world.action_history.append({"action": "update_config", "service": service, "key": key, "value": value})
-    return f"Configuration updated: '{service}.{key}' set to {value} (Cost: ${cost:.2f}). Reload succeeded."
+    world.action_history.append({"action": "update_config", "service": service, "key": key, "value": validated_value})
+    return f"Configuration updated: '{service}.{key}' set to {validated_value} (Cost: ${cost:.2f}). Reload succeeded."
 
 def action_reroute_traffic(world: CloudMeshWorld, args: Dict[str, Any]) -> str:
     service = args.get("service", "")

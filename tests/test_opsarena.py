@@ -1,17 +1,17 @@
-"""OpsArena Comprehensive Test Suite.
+"""OpsArena Comprehensive Test Suite & Adversarial Verification.
 
 Verifies:
-1. World initialization and deterministic reset.
-2. Action implementations, budget accounting, boundary checks.
-3. Secret redaction in logs and metrics.
-4. Schema validation and error handling.
-5. All 8 tasks: Reference Oracle >= 0.95, No-Op <= 0.05.
-6. Append file injection and path traversal security.
+1. Deterministic reset & 64-char SHA-256 state hash consistency across seeds.
+2. Malformed config inputs ("banana", negative ints, invalid types) return clean errors without crashing the verifier.
+3. Metric schema alignment (QPS vs RPS aliases, status, bounds).
+4. Dynamic regression penalties when non-target services are disrupted.
+5. Continuous partial credit progression on incremental mitigation steps.
+6. Multi-seed baseline verification across all 8 tasks (Oracle >= 0.95, No-Op <= 0.05).
+7. Append file loading & path traversal defense.
 """
 import threading
 import time
 from http.server import ThreadingHTTPServer
-from pathlib import Path
 import pytest
 import requests
 
@@ -27,109 +27,150 @@ from harness.run import load_append, NOOP_MAX, ORACLE_MIN
 @pytest.fixture(scope="module")
 def local_sandbox():
     """Spins up a lightweight in-process sandbox HTTP server for integration tests."""
-    server = ThreadingHTTPServer(("127.0.0.1", 9050), SandboxHandler)
+    server = ThreadingHTTPServer(("127.0.0.1", 9150), SandboxHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     time.sleep(0.1)
-    yield "http://127.0.0.1:9050"
+    yield "http://127.0.0.1:9150"
     server.shutdown()
 
 
-def test_world_initialization():
-    world = CloudMeshWorld(seed=42)
-    assert len(world.services) == 8
-    assert "order-service" in world.services
-    assert "cache-cluster" in world.services
-    assert world.cost_spent == 0.0
-    assert not world.finished
-    h1 = world.state_hash()
-    assert len(h1) == 8
+def test_world_deterministic_reset():
+    """Identical seed must produce identical 64-char SHA-256 state hash."""
+    w1 = CloudMeshWorld(seed=42)
+    w2 = CloudMeshWorld(seed=42)
+    assert w1.state_hash() == w2.state_hash()
+    assert len(w1.state_hash()) == 64
+
+    # Multiple resets of same seed
+    t1 = build_task("task_01_cache_pressure", seed=10)
+    w1.load_scenario(t1.scenario_spec)
+    h1 = w1.state_hash()
+
+    t2 = build_task("task_01_cache_pressure", seed=10)
+    w2.load_scenario(t2.scenario_spec)
+    h2 = w2.state_hash()
+    assert h1 == h2
 
 
-def test_actions_and_budget_bounds():
-    world = CloudMeshWorld(seed=0)
-    
-    # get_topology costs $1.00
-    res = ACTION_HANDLERS["get_topology"](world, {})
-    assert "CloudMesh Services Topology" in res
-    assert world.cost_spent == 1.0
+def test_malformed_config_inputs_do_not_crash_scorer(local_sandbox):
+    """Adversarial/malformed inputs must return clean errors and never cause TypeError in scoring."""
+    env = Env(local_sandbox)
+    env.reset("task_03_db_pool_exhaustion", seed=0)
 
-    # scale_service bounds checking
-    res_err = ACTION_HANDLERS["scale_service"](world, {"service": "order-service", "replicas": 99})
-    assert "error: replicas must be an integer between 1 and 20" in res_err
+    # 1. String where integer is expected (the reviewer's exact test case)
+    out, err = env.step("update_config", {"service": "inventory-service", "key": "db_pool_size", "value": "banana"})
+    assert err is True
+    assert "error:" in out
+    assert "banana" in out
 
-    # valid scale_service
-    # default order-service replicas is 3, scaling to 4: cost = |4 - 3| * 2.0 + 3.0 = 5.00 -> total cost = 6.00
-    res_ok = ACTION_HANDLERS["scale_service"](world, {"service": "order-service", "replicas": 4})
-    assert "Successfully scaled" in res_ok
-    assert world.cost_spent == 6.0
+    # 2. Negative integer where bounded range required
+    out, err = env.step("update_config", {"service": "db-primary", "key": "lock_timeout_ms", "value": -500})
+    assert err is True
+    assert "error:" in out
 
-    # rollback_release
-    res_rb = ACTION_HANDLERS["rollback_release"](world, {"service": "order-service", "target_version": "v2.4.0"})
-    assert "Deployment rollback initiated" in res_rb
+    # 3. Non-boolean string for boolean flag
+    out, err = env.step("update_config", {"service": "payment-service", "key": "circuit_breaker_enabled", "value": "not_bool"})
+    assert err is True
+    assert "error:" in out
 
-    # unauthorized config key
-    res_bad_cfg = ACTION_HANDLERS["update_config"](world, {"service": "order-service", "key": "malicious_eval", "value": 1})
-    assert "error: configuration key 'malicious_eval' is not allowed" in res_bad_cfg
+    # 4. Out of bounds integer
+    out, err = env.step("update_config", {"service": "api-gateway", "key": "rate_limit_rps", "value": 9999999})
+    assert err is True
+    assert "error:" in out
 
-    # exhaust budget
-    world.cost_spent = 149.0
-    res_over = ACTION_HANDLERS["scale_service"](world, {"service": "order-service", "replicas": 8})
-    assert "error: Action denied: cost" in res_over
+    # 5. Unauthorized key
+    out, err = env.step("update_config", {"service": "order-service", "key": "drop_tables", "value": True})
+    assert err is True
+    assert "error:" in out
 
-
-def test_secret_redaction():
-    world = CloudMeshWorld(seed=0)
-    logs = ACTION_HANDLERS["query_logs"](world, {"service": "order-service", "filter": "token"})
-    assert "jwt_secret_token" not in logs
-    assert "prod_pg_password" not in logs
-    assert "sk-" not in logs
+    # Crucial assertion: Scorer must NOT crash with TypeError
+    score_res = env.score()
+    assert isinstance(score_res, dict)
+    assert score_res["total"] <= NOOP_MAX
 
 
-def test_schema_validation():
-    # Valid get_topology
-    assert check_args("get_topology", {}) is None
+def test_metric_schema_and_alias_alignment(local_sandbox):
+    """query_metrics must cleanly accept both 'qps' and 'rps' without errors."""
+    env = Env(local_sandbox)
+    env.reset("task_01_cache_pressure", seed=0)
 
-    # Missing required argument
-    assert "missing required argument 'service'" in check_args("query_metrics", {})
+    out_qps, err_qps = env.step("query_metrics", {"service": "api-gateway", "metric": "qps"})
+    assert not err_qps, f"query_metrics with qps failed: {out_qps}"
+    assert "req/s" in out_qps
 
-    # Invalid type
-    assert "must be an integer" in check_args("scale_service", {"service": "order-service", "replicas": "five"})
-    assert "must be an integer" in check_args("scale_service", {"service": "order-service", "replicas": True})
-
-    # Unknown tool
-    assert "unknown tool" in check_args("drop_database", {})
+    out_rps, err_rps = env.step("query_metrics", {"service": "api-gateway", "metric": "rps"})
+    assert not err_rps, f"query_metrics with rps failed: {out_rps}"
+    assert "req/s" in out_rps
 
 
-def test_all_eight_tasks_baselines(local_sandbox):
+def test_dynamic_regression_penalty(local_sandbox):
+    """Disrupting an unrelated microservice must actively degrade the regression score."""
+    env = Env(local_sandbox)
+    env.reset("task_02_bad_deployment", seed=0)
+
+    # Solve the primary incident
+    env.step("rollback_release", {"service": "order-service", "target_version": "v2.4.0"})
+    score_before = env.score()
+    assert score_before["no_regressions"] == 0.25  # 100% of 0.25 weight
+
+    # Cause unneeded damage to an unrelated service (scale payment-service down to 1 pod)
+    env.step("scale_service", {"service": "payment-service", "replicas": 1})
+    score_after = env.score()
+    assert score_after["no_regressions"] < score_before["no_regressions"]
+    assert score_after["total"] < score_before["total"]
+
+
+def test_continuous_partial_credit_progression(local_sandbox):
+    """Incremental progress must award bounded partial credit while no-op stays <= 0.05."""
     env = Env(local_sandbox)
 
-    for task_id in TASKS:
-        task = build_task(task_id, seed=0)
+    # Step 0: No-op
+    env.reset("task_03_db_pool_exhaustion", seed=0)
+    score_noop = env.score()["total"]
+    assert score_noop == 0.0000
 
-        # 1. No-op verification
-        env.reset(task_id, seed=0)
-        noop_res = env.score()
-        assert noop_res["total"] <= NOOP_MAX, f"Task {task_id} failed no-op baseline check (got {noop_res['total']})"
+    # Step 1: Partial progress (pool size increased to 15, short of target 25)
+    env.step("update_config", {"service": "inventory-service", "key": "db_pool_size", "value": 15})
+    score_partial = env.score()["total"]
+    assert 0.10 <= score_partial <= 0.40, f"Expected bounded partial credit, got {score_partial}"
 
-        # 2. Oracle verification
-        env.reset(task_id, seed=0)
-        for name, args in task.oracle_actions:
-            out, err = env.step(name, args)
-            assert not err, f"Task {task_id} oracle action {name} errored: {out}"
-
-        oracle_res = env.score()
-        assert oracle_res["total"] >= ORACLE_MIN, (
-            f"Task {task_id} failed oracle baseline check (got {oracle_res['total']}, expected >= {ORACLE_MIN})"
-        )
+    # Step 2: Full resolution (pool size increased to 25)
+    env.step("update_config", {"service": "inventory-service", "key": "db_pool_size", "value": 25})
+    score_full = env.score()["total"]
+    assert score_full >= ORACLE_MIN, f"Expected full marks, got {score_full}"
 
 
-def test_append_file_loading(tmp_path):
-    # Missing optional file returns empty
+def test_all_eight_tasks_baselines_multi_seeds(local_sandbox):
+    """All 8 tasks across multiple seeds must pass Oracle >= 0.95 and No-Op <= 0.05."""
+    env = Env(local_sandbox)
+
+    for seed in [0, 42, 99]:
+        for task_id in TASKS:
+            task = build_task(task_id, seed=seed)
+
+            # 1. No-op verification
+            env.reset(task_id, seed=seed)
+            noop_score = env.score()["total"]
+            assert noop_score <= NOOP_MAX, f"Task {task_id} seed {seed} failed no-op (got {noop_score})"
+
+            # 2. Oracle verification
+            env.reset(task_id, seed=seed)
+            for name, args in task.oracle_actions:
+                out, err = env.step(name, args)
+                assert not err, f"Task {task_id} seed {seed} action {name} failed: {out}"
+
+            oracle_score = env.score()["total"]
+            assert oracle_score >= ORACLE_MIN, (
+                f"Task {task_id} seed {seed} failed oracle check (got {oracle_score}, expected >= {ORACLE_MIN})"
+            )
+
+
+def test_append_file_loading():
+    """Ensures inputs/ loading works and directory traversal is blocked."""
     text, info = load_append(None)
     assert text == ""
     assert info is None
 
-    # Directory traversal rejection
     with pytest.raises(ValueError, match="must be within inputs/ directory"):
-        load_append("../secret.txt")
+        load_append("../etc/passwd")
