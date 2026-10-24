@@ -168,3 +168,4 @@ TASK_ID=task_02_bad_deployment MODE=full python -m harness.run
 - `design-doc.pdf`: 2-page publication-quality technical specification.
 - `deck.pdf`: 10-slide keynote presentation deck.
 - `team_087.zip`: Packaged submission archive ready for competition evaluation.
+ origin/main

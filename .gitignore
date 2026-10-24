@@ -1,13 +1,33 @@
+# Environment and secrets
 .env
+.env.*
+!.env.example
+
+# Python
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Testing & Coverage
 .pytest_cache/
+.coverage
+htmlcov/
+
+# Previews & Local artifacts
 pdf_previews/
+organizer-template/
+test_workspace/
+
+# Dynamic logs and inputs (keep repo clean)
 logs/*
 !logs/.gitkeep
 inputs/*
 !inputs/.gitkeep
 !inputs/README.md
-organizer-template/
-test_workspace/
