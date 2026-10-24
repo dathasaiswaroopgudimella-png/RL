@@ -118,7 +118,7 @@ task_08_migration_lock       oracle 1.00 [PASS]   no-op 0.00 [PASS]
 - **Pre-Flight Execution Time**: **2.30 seconds** (budget: 120s).
 - **Oracle Baseline**: **100% PASS** ($\ge 0.95$ across all tasks; mean: 0.999).
 - **No-Op Baseline**: **100% PASS** ($0.0000 \le 0.05$ across all tasks).
-- **Automated Test Suite**: **28 unit, integration, and adversarial tests** passing in 7.56s (`pytest tests/ -v`).
+- **Automated Test Suite**: **35 unit, integration, and adversarial tests** passing in 9.33s (`pytest tests/ -v`).
 
 ---
 
@@ -160,7 +160,10 @@ TASK_ID=task_02_bad_deployment MODE=full python -m harness.run
 
 ---
 
-## 7. Submission Artifacts
+## 7. Submission Artifacts & Verification Documents
+
+- docs/requirements-traceability.md: Full 25-point requirements traceability matrix mapping all problem statement criteria.
+- docs/final-verification-report.md: Formal gate verification clearance report for Gates A through E.
 
 - `baseline-results/gate.json`: Verifiable baseline report across all 8 tasks.
 - `test-run-logs/`: Complete telemetry logs from three real model evaluations (`run_01_task_02_bad_deployment`, `run_02_task_01_cache_pressure`, `run_03_task_05_cascading_failure_failed`).

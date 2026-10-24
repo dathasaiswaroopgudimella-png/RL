@@ -92,6 +92,7 @@ def do_state(_body=None):
             "cost_spent": WORLD.cost_spent,
             "finished": WORLD.finished,
             "action_count": len(WORLD.action_history),
+            "action_history": list(WORLD.action_history),
             "step_count": WORLD.step_count,
             "regression_score": WORLD.compute_regression_score(),
             "services": services_dict,

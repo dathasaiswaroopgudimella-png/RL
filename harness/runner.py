@@ -40,7 +40,14 @@ class JsonlLog:
         self.file.write(json.dumps(record, default=str) + "\n")
 
     def close(self) -> None:
-        self.file.close()
+        if not self.file.closed:
+            self.file.close()
+
+    def __enter__(self) -> "JsonlLog":
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.close()
 
 
 def now() -> str:
@@ -87,8 +94,14 @@ def trim_history(messages: List[Dict[str, Any]], budget: int) -> None:
                     break
             if shrunk:
                 break
-        if not shrunk:
-            return
+        if shrunk:
+            continue
+
+        # If tool results and arguments are already trimmed, drop older turns while preserving system [0] and task description [1]
+        if len(messages) > 3:
+            messages.pop(2)
+            continue
+        break
 
 
 def run_scripted(env: Any, task_id: str, seed: int, actions: List[Any], agent: str, log: JsonlLog) -> Dict[str, Any]:
@@ -117,6 +130,7 @@ def run_scripted(env: Any, task_id: str, seed: int, actions: List[Any], agent: s
         show(record)
 
     final = env.score(model_turns=step)
+    termination = "success" if (final.get("total") or 0.0) >= PASS_SCORE else "failure"
     log.write({
         "timestamp": now(),
         "agent": agent,
@@ -124,7 +138,9 @@ def run_scripted(env: Any, task_id: str, seed: int, actions: List[Any], agent: s
         "event": "episode_end",
         "seed": seed,
         "steps": step,
+        "termination": termination,
         "reward": final,
+        "state": {"hash": env.state_hash()},
     })
     return final
 
@@ -173,6 +189,28 @@ def run_episode(
             break
 
         trim_history(messages, limits.context_budget_tokens)
+        if estimate_tokens(messages) > limits.context_budget_tokens:
+            termination = "context_limit"
+            record: Dict[str, Any] = {
+                "timestamp": now(),
+                "agent": "model",
+                "task": task_id,
+                "step": step,
+                "seed": seed,
+                "model_input": [],
+                "model_output_raw": None,
+                "parsed_actions": [],
+                "tool_result": [],
+                "errors": [{"kind": "context_limit_exceeded", "detail": "Context budget exceeded hard bound"}],
+                "state": {"hash": env.state_hash()},
+                "reward": None,
+                "tokens": 0,
+                "latency_ms": 0,
+            }
+            log.write(record)
+            show(record)
+            break
+
         sent = copy.deepcopy(messages)
         call_start = time.monotonic()
         steps = step
@@ -197,10 +235,13 @@ def run_episode(
         try:
             reply = client.complete(sent, TOOLS, timeout=call_timeout)
         except Exception as exc:
+            if started is not None and (time.monotonic() - started) >= max_seconds:
+                termination = "time_cap"
+            else:
+                termination = "crash"
             record["errors"].append({"kind": "model_call_failed", "detail": f"{type(exc).__name__}: {exc}"})
             log.write(record)
             show(record)
-            termination = "crash"
             break
 
         record["latency_ms"] = int((time.monotonic() - call_start) * 1000)
@@ -226,24 +267,36 @@ def run_episode(
                 "content": "No tool call was received. Call one of the available operational tools, or call `finish` when done.",
             })
 
+        dispatched_count = 0
         for index, call in enumerate(reply.tool_calls):
             args, parse_error = call.parse()
             record["parsed_actions"].append({"tool": call.name, "args": args, "parse_error": parse_error})
 
+            # --- Validation gate: determine whether this call should execute ---
+            rejected = False
+            result = ""
+
             if finished:
                 result = "not run: the episode has already finished"
-            elif index >= limits.max_tool_calls:
+                rejected = True
+            elif dispatched_count >= limits.max_tool_calls:
                 result = f"not run: at most {limits.max_tool_calls} tool calls allowed per turn"
                 record["errors"].append({"kind": "too_many_tool_calls", "detail": call.name})
+                rejected = True
             elif parse_error:
                 result = f"error: {parse_error}"
                 record["errors"].append({"kind": "unparsable_arguments", "detail": call.name})
+                rejected = True
             elif call.name not in SPECS:
                 result = f"error: unknown tool '{call.name}'. Available: {', '.join(TOOL_NAMES)}"
                 record["errors"].append({"kind": "unknown_tool", "detail": call.name})
+                rejected = True
             elif (problem := check_args(call.name, args)):
                 result = f"error: {problem}"
                 record["errors"].append({"kind": "invalid_arguments", "detail": f"{call.name}: {problem}"})
+                rejected = True
+
+            # --- Time budget check ---
             tool_rem = max_seconds - (time.monotonic() - started) if started else max_seconds
             if tool_rem <= 0:
                 termination = "time_cap"
@@ -253,15 +306,16 @@ def run_episode(
                 record["tool_result"].append(result)
                 messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
                 break
-            elif call.name == "finish":
-                finished = True
-                result, is_error = env.step("finish", {}, timeout=min(env.tool_timeout, max(1, int(tool_rem))))
+
+            # --- Dispatch only if validation passed ---
+            if not rejected:
+                tool_timeout = min(env.tool_timeout, max(1, int(tool_rem)))
+                if call.name == "finish":
+                    finished = True
+                result, is_error = env.step(call.name, args, timeout=tool_timeout)
                 if is_error:
                     record["errors"].append({"kind": "tool_error", "detail": result})
-            else:
-                result, is_error = env.step(call.name, args, timeout=min(env.tool_timeout, max(1, int(tool_rem))))
-                if is_error:
-                    record["errors"].append({"kind": "tool_error", "detail": result})
+                dispatched_count += 1
 
             result = clip_output(result, limits.max_output_chars)
             record["tool_result"].append(result)

@@ -1,7 +1,7 @@
 {
   "seed": 0,
   "passed": true,
-  "gate_seconds": 2.3,
+  "gate_seconds": 3.44,
   "tasks": [
     {
       "task": "task_01_cache_pressure",

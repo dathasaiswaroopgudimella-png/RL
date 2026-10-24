@@ -195,6 +195,10 @@ class CloudMeshWorld:
             if svc.traffic_weight == 0:
                 penalties += 0.40
 
+            # Penalty if non-target circuit_breaker_enabled was changed (top-level attribute)
+            if svc.circuit_breaker_enabled != base.get("circuit_breaker_enabled", False):
+                penalties += 0.25
+
             # Config regression check: penalize unauthorized config mutations on non-target services
             base_config = base.get("config", {})
             for cfg_k, cfg_v in svc.config.items():
@@ -217,6 +221,7 @@ class CloudMeshWorld:
             "incident_spec": incident_spec,
             "cost_spent": round(self.cost_spent, 2),
             "step_count": self.step_count,
+            "action_count": len(self.action_history),
             "finished": self.finished,
         }
         raw_bytes = json.dumps(state_repr, sort_keys=True).encode("utf-8")

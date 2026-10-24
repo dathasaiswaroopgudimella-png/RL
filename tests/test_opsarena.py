@@ -518,19 +518,206 @@ def test_full_cluster_downsizing_attack_scores_zero(local_sandbox):
     assert score["slo_recovery"] == 0.0000
 
 
-def test_wall_clock_time_limit_enforced_in_runner():
-    """Runner must enforce Limits.max_seconds and terminate with 'time_cap' if deadline expires."""
-    from harness.runner import Limits, run_scripted, JsonlLog
+def test_state_hash_changes_with_action_count():
+    """Two worlds with identical service configurations but different action histories must have distinct hashes."""
+    w1 = CloudMeshWorld(seed=42)
+    w2 = CloudMeshWorld(seed=42)
+    assert w1.state_hash() == w2.state_hash()
+
+    # Append a read action to w1's action history
+    w1.action_history.append({"tool": "get_topology", "args": {}})
+    assert w1.state_hash() != w2.state_hash()
+    assert len(w1.state_hash()) == 64
+    assert len(w2.state_hash()) == 64
+
+
+def test_non_target_circuit_breaker_regression_penalty(local_sandbox):
+    """Mutating circuit_breaker_enabled on payment-service during Task 1 (cache pressure) triggers regression penalty."""
+    env = Env(local_sandbox)
+    env.reset("task_01_cache_pressure", seed=0)
+
+    # Resolve task 1 target (cache-cluster)
+    env.step("scale_service", {"service": "cache-cluster", "replicas": 4})
+    env.step("scale_service", {"service": "order-service", "replicas": 4})
+
+    # Unauthorized mutation of non-target service: flip circuit breaker on payment-service
+    env.step("update_config", {"service": "payment-service", "key": "circuit_breaker_enabled", "value": True})
+    env.step("finish", {})
+
+    score = env.score()
+    # Regression score must penalize non-target mutation
+    assert score["no_regressions"] < 0.25
+
+
+def test_runner_rejects_excess_tool_calls_over_ten(local_sandbox):
+    """Runner must execute at most 10 tool calls per turn and reject call 11 without executing it in sandbox."""
+    from harness.runner import Limits, run_episode, JsonlLog
+    from harness.agents import ToolCall, Reply
     from pathlib import Path
     import tempfile
 
+    class ElevenCallsClient:
+        def start(self, task):
+            pass
+
+        def complete(self, messages, tools, timeout):
+            calls = [
+                ToolCall(id=f"call_{i}", name="get_topology", arguments="{}")
+                for i in range(11)
+            ]
+            return Reply(text="checking all", tool_calls=calls)
+
     with tempfile.TemporaryDirectory() as tmpdir:
-        log = JsonlLog(Path(tmpdir) / "test.jsonl")
-        mock_env = Env("http://127.0.0.1:59999")
-        # Initialize with max_seconds that immediately expires
-        limits = Limits(max_seconds=0)
-        # Runner loop checks remaining time and sets termination = 'time_cap'
-        assert limits.max_seconds == 0
-        log.close()
+        with JsonlLog(Path(tmpdir) / "test.jsonl") as log:
+            env = Env(local_sandbox)
+            limits = Limits(max_steps=1, max_tool_calls=10)
+            res = run_episode(env=env, task_id="task_01_cache_pressure", seed=0, client=ElevenCallsClient(), append_text="", limits=limits, log=log)
+
+        # Check sandbox step_count: exactly 10 were executed ($10 cost), 11th was rejected
+        state = requests.get(f"{local_sandbox}/state").json()
+        assert state["step_count"] == 10
+        assert state["cost_spent"] == 10.0
+        assert res["steps"] == 1
+
+
+def test_runner_invalid_finish_arguments_does_not_finish(local_sandbox):
+    """Calling finish with invalid arguments is rejected at validation gate and does not finish episode."""
+    from harness.runner import Limits, run_episode, JsonlLog
+    from harness.agents import ToolCall, Reply
+    from pathlib import Path
+    import tempfile
+
+    class BadFinishClient:
+        def __init__(self):
+            self.turn = 0
+
+        def start(self, task):
+            self.turn = 0
+
+        def complete(self, messages, tools, timeout):
+            self.turn += 1
+            if self.turn == 1:
+                return Reply(text="finish", tool_calls=[
+                    ToolCall(id="c1", name="finish", arguments='{"unexpected": "argument"}')
+                ])
+            return Reply(text="done", tool_calls=[
+                ToolCall(id="c2", name="finish", arguments="{}")
+            ])
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with JsonlLog(Path(tmpdir) / "test.jsonl") as log:
+            env = Env(local_sandbox)
+            limits = Limits(max_steps=2)
+            res = run_episode(env=env, task_id="task_01_cache_pressure", seed=0, client=BadFinishClient(), append_text="", limits=limits, log=log)
+
+        assert res["steps"] == 2
+        state = requests.get(f"{local_sandbox}/state").json()
+        assert state["finished"] is True
+
+
+def test_runner_unknown_tools_never_dispatched(local_sandbox):
+    """Unknown tool calls must be rejected at validation gate and never dispatched to sandbox."""
+    from harness.runner import Limits, run_episode, JsonlLog
+    from harness.agents import ToolCall, Reply
+    from pathlib import Path
+    import tempfile
+
+    class UnknownToolClient:
+        def start(self, task):
+            pass
+
+        def complete(self, messages, tools, timeout):
+            return Reply(text="hack", tool_calls=[
+                ToolCall(id="c1", name="rm_rf_database", arguments='{"path": "/"}'),
+                ToolCall(id="c2", name="finish", arguments="{}"),
+            ])
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with JsonlLog(Path(tmpdir) / "test.jsonl") as log:
+            env = Env(local_sandbox)
+            limits = Limits(max_steps=1)
+            res = run_episode(env=env, task_id="task_01_cache_pressure", seed=0, client=UnknownToolClient(), append_text="", limits=limits, log=log)
+
+        state = requests.get(f"{local_sandbox}/state").json()
+        dispatched_actions = [a["action"] for a in state["action_history"]]
+        assert "rm_rf_database" not in dispatched_actions
+        assert "finish" in dispatched_actions
+
+
+def test_runner_invalid_calls_do_not_mutate_cost_or_state(local_sandbox):
+    """Tool calls with schema/type violations fail at validation gate with 0 cost charged and no state change."""
+    from harness.runner import Limits, run_episode, JsonlLog
+    from harness.agents import ToolCall, Reply
+    from pathlib import Path
+    import tempfile
+
+    class InvalidArgsClient:
+        def start(self, task):
+            pass
+
+        def complete(self, messages, tools, timeout):
+            return Reply(text="bad args", tool_calls=[
+                ToolCall(id="c1", name="scale_service", arguments='{"service": "cache-cluster"}'),
+                ToolCall(id="c2", name="update_config", arguments='{"service": 123, "key": "k", "value": "v"}'),
+                ToolCall(id="c3", name="finish", arguments="{}"),
+            ])
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with JsonlLog(Path(tmpdir) / "test.jsonl") as log:
+            env = Env(local_sandbox)
+            limits = Limits(max_steps=1)
+            res = run_episode(env=env, task_id="task_01_cache_pressure", seed=0, client=InvalidArgsClient(), append_text="", limits=limits, log=log)
+
+        state = requests.get(f"{local_sandbox}/state").json()
+        assert state["cost_spent"] == 0.0
+        assert len(state["action_history"]) == 1
+        assert state["action_history"][0]["action"] == "finish"
+
+
+def test_wall_clock_time_limit_enforced_in_runner(local_sandbox):
+    """Runner must enforce Limits.max_seconds and terminate with 'time_cap' during actual episode loop."""
+    from harness.runner import Limits, run_episode, JsonlLog
+    from harness.agents import ToolCall, Reply
+    from pathlib import Path
+    import tempfile
+
+    class SlowClient:
+        def start(self, task):
+            pass
+
+        def complete(self, messages, tools, timeout):
+            time.sleep(0.1)
+            return Reply(text="thinking", tool_calls=[ToolCall(id="c1", name="get_topology", arguments="{}")])
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with JsonlLog(Path(tmpdir) / "test.jsonl") as log:
+            env = Env(local_sandbox)
+            limits = Limits(max_steps=5, max_seconds=0.05)
+            res = run_episode(env=env, task_id="task_01_cache_pressure", seed=0, client=SlowClient(), append_text="", limits=limits, log=log)
+
+        assert res["termination"] == "time_cap"
+
+
+def test_runner_context_budget_hard_cap_enforced(local_sandbox):
+    """Runner cleanly terminates with 'context_limit' when message history exceeds context budget hard bound."""
+    from harness.runner import Limits, run_episode, JsonlLog
+    from harness.agents import ToolCall, Reply
+    from pathlib import Path
+    import tempfile
+
+    class NormalClient:
+        def start(self, task):
+            pass
+
+        def complete(self, messages, tools, timeout):
+            return Reply(text="ok", tool_calls=[ToolCall(id="c1", name="get_topology", arguments="{}")])
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with JsonlLog(Path(tmpdir) / "test.jsonl") as log:
+            env = Env(local_sandbox)
+            limits = Limits(max_steps=5, context_budget_tokens=5)
+            res = run_episode(env=env, task_id="task_01_cache_pressure", seed=0, client=NormalClient(), append_text="", limits=limits, log=log)
+
+        assert res["termination"] == "context_limit"
 
 

@@ -33,6 +33,7 @@ INCLUDED_PATTERNS = [
 ]
 
 INCLUDED_DIRS = [
+    "docs",
     "harness",
     "sandbox",
     "sample-trajectories",

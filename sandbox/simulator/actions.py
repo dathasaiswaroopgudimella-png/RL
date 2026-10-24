@@ -206,6 +206,11 @@ def action_update_config(world: CloudMeshWorld, args: Dict[str, Any]) -> str:
     world.step_count += 1
     if key == "circuit_breaker_enabled":
         world.services[service].circuit_breaker_enabled = validated_value
+        # Synchronise with config dictionary to keep regression scoring consistent
+        world.services[service].config["circuit_breaker_enabled"] = validated_value
+    elif key == "circuit_breaker":
+        # order-service uses 'circuit_breaker' in its config dict
+        world.services[service].config[key] = validated_value
     else:
         world.services[service].config[key] = validated_value
 
