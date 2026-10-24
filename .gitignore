@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
+pdf_previews/
 logs/*
 !logs/.gitkeep
 inputs/*
