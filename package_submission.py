@@ -21,6 +21,7 @@ INCLUDED_PATTERNS = [
     "Dockerfile.harness",
     "Dockerfile.sandbox",
     "requirements.txt",
+    "LICENSE",
     "README.md",
     "design-doc.pdf",
     "deck.pdf",
